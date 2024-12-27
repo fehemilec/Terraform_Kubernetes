@@ -1,0 +1,51 @@
+name: "aks-store"
+# on:
+#   workflow_dispatch:
+
+on:
+  push:
+      branches:
+        - 'aks_deployments_fehemi'
+
+jobs:
+  Plan_Test:
+    if: github.ref == 'refs/heads/aks_deployments_fehemi'
+    uses: scigility/caspar/.github/workflows/aks_store_tf_plan.yml@aks_deployments_fehemi
+    secrets: inherit
+    with:
+      PATH: aks_feh_template
+      ENVIRONMENT: test
+      RG_NAME: rg-aks-fehemi
+      AKS_CLUSTER_NAME: aks_cluster_fehemi
+      KEYVAULT_NAME: keyvault-fehemi
+      TF_CONTAINER_NAME: platform
+
+  # Deploy_Test:
+  #   needs: Plan_Test
+  #   uses: scigility/caspar/.github/workflows/aks_store_tf_apply.yml@aks_deployments_fehemi
+  #   with:
+  #     PATH: aks_feh_template
+  #     tf_vars_file: dev.tfvars
+  #     gh_environment: dev
+
+  Plan_Dev:
+    if: github.ref == 'refs/heads/aks_deployments_fehemi'
+    uses: scigility/caspar/.github/workflows/aks_store_tf_plan.yml@aks_deployments_fehemi
+    needs: Plan_Test
+    secrets: inherit
+    with:
+      PATH: aks_feh_template
+      ENVIRONMENT: dev
+      RG_NAME: rg-aks-fehemi
+      AKS_CLUSTER_NAME: aks_cluster_fehemi
+      KEYVAULT_NAME: keyvault-fehemi
+      TF_CONTAINER_NAME: platform
+
+
+  # Deploy_Dev:
+  #   needs: Plan_Dev
+  #   uses: scigility/caspar/.github/workflows/aks_store_tf_plan.yml@main
+  #   with:
+  #     PATH: aks_feh_template
+  #     tf_vars_file: appr.tfvars
+  #     ENVIRONMENT: appr

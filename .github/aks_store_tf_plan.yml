@@ -1,0 +1,139 @@
+name: "Build_TF_Plan"
+on:
+  workflow_call:
+    inputs:
+      PATH:
+        description: 'Specifies the path of the root terraform module.'
+        required: true
+        type: string
+      tf_version:
+        description: 'Specifies version of Terraform to use. e.g: 1.1.0 Default=latest.'
+        required: false
+        type: string
+        default: latest
+      ENVIRONMENT:
+        description: 'Specifies the GitHub deployment environment.'
+        required: false
+        type: string
+        default: null
+      RG_NAME:
+        description: 'rg-name'
+        required: true
+        type: string
+      AKS_CLUSTER_NAME:
+        description: 'aks-name'
+        required: true
+        type: string
+      KEYVAULT_NAME:
+        description: 'keyvault-name'
+        required: true
+        type: string
+      TF_CONTAINER_NAME:
+        description: 'terraform state container'
+        required: true
+        type: string
+
+jobs:
+  build-plan:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.PATH }}
+        
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+
+      - uses: azure/login@v2
+        with:
+            creds: '{"clientId":"${{ secrets.ARM_CLIENT_ID }}","clientSecret":"${{ secrets.ARM_CLIENT_SECRET }}","subscriptionId":"${{ secrets.ARM_SUBSCRIPTION_ID }}","tenantId":"${{ secrets.ARM_TENANT_ID }}"}'
+
+      - name: Change file name
+        run: | 
+          mv ${{ github.workspace }}/${{ inputs.PATH }}/${{ inputs.ENVIRONMENT }}.tfvars  ${{ github.workspace }}/${{ inputs.PATH }}/${{ inputs.ENVIRONMENT }}.auto.tfvars 
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: ${{ inputs.tf_version }}
+
+      - name: Terraform Init
+        id: init
+        env:
+            ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+            ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
+            ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+            ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+        run: |
+            terraform init \
+            -backend-config="resource_group_name=ce-shared" \
+            -backend-config="storage_account_name=satfstatesfehemi" \
+            -backend-config="container_name=${{ inputs.TF_CONTAINER_NAME }}-${{ inputs.ENVIRONMENT }}" \
+            -backend-config="key=platform.tfstate"
+
+      
+      - name: Terraform Validate
+        id: validate
+        env:
+            ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+            ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
+            ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+            ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+        run: terraform validate
+
+      - name: Terraform Plan
+        id: plan
+        env:
+            ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+            ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
+            ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+            ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+        run: terraform plan
+        continue-on-error: true
+
+      - name: Terraform Plan Status
+        if: steps.plan.outcome == 'failure'
+        run: exit 1
+
+      - name: Terraform Apply
+        env:
+            ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+            ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
+            ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+            ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+        run: terraform apply -auto-approve
+
+
+  deploy_kubernetes_services:
+    needs: build-plan
+    runs-on: ubuntu-latest
+    steps:
+        - name: Checkout Repository
+          uses: actions/checkout@v3
+
+
+        - uses: azure/login@v2
+          with:
+            creds: '{"clientId":"${{ secrets.ARM_CLIENT_ID }}","clientSecret":"${{ secrets.ARM_CLIENT_SECRET }}","subscriptionId":"${{ secrets.ARM_SUBSCRIPTION_ID }}","tenantId":"${{ secrets.ARM_TENANT_ID }}"}'
+
+        
+        - name: Set up AKS context
+          run: az aks get-credentials --resource-group ${{inputs.RG_NAME}}-${{inputs.ENVIRONMENT}} --name ${{inputs.AKS_CLUSTER_NAME}}_${{inputs.ENVIRONMENT}}
+
+        - name: Get AKS Node Pool/Kubelet Identity Managed Id
+          run: |
+            AKS_POOL_MID=$(az aks show --resource-group ${{inputs.RG_NAME}}-${{inputs.ENVIRONMENT}} --name ${{inputs.AKS_CLUSTER_NAME}}_${{inputs.ENVIRONMENT}} --query "identityProfile.kubeletidentity.clientId" -o tsv)
+            echo "AKS_POOL_MID=$AKS_POOL_MID" >> $GITHUB_ENV
+
+        - name: Apply SecretProviderClass
+          run: |
+            echo MI: $AKS_POOL_MID
+            kubectl apply -f ./aks_feh_template/store_deployment/secretproviderclass.yml -o yaml | \
+            sed "s/<MANAGED_IDENTITY_CLIENT_ID>/${{env.AKS_POOL_MID}}/g" | \
+            kubectl apply -f -
+
+
+        - name: Apply Kubernetes Manifests
+          run: |
+            kubectl apply -f ./aks_feh_template/store_deployment/aks-store-quickstart.yml
